@@ -17,6 +17,17 @@
 namespace Slic3r {
 namespace GUI {
 
+// Raycasters and trafo matrices are built for model parts only, so mesh_id indexes model parts, not mo->volumes.
+static const ModelVolume *get_model_part(const ModelObject *mo, int mesh_id)
+{
+    if (!mo || mesh_id < 0)
+        return nullptr;
+    int part_idx = 0;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part() && part_idx++ == mesh_id)
+            return mv;
+    return nullptr;
+}
 
 GLGizmoFlatten::GLGizmoFlatten(GLCanvas3D& parent, unsigned int sprite_id)
     : GLGizmoBase(parent, sprite_id)
@@ -150,9 +161,10 @@ bool GLGizmoFlatten::update_raycast_cache(const Vec2d &mouse_position, const Cam
                 closest_hit                  = hit;
                 closest_nromal               = normal;
                 if (m_faltten_type == FlattenType::Triangle) {
-                    auto mo                   = m_c->selection_info()->model_object();
-                    auto mv                   = mo->volumes[mesh_id];
-                    m_hit_object_normal       = mv->get_matrix().cast<float>() * closest_nromal;
+                    // Normal is a direction: transform it by the inverse transpose of the volume's linear part only,
+                    // applying the full affine matrix would add the volume offset and skew the direction.
+                    if (const ModelVolume *mv = get_model_part(m_c->selection_info()->model_object(), mesh_id))
+                        m_hit_object_normal = (mv->get_matrix().linear().inverse().transpose().cast<float>() * closest_nromal).normalized();
                 }
             }
         }
@@ -216,13 +228,14 @@ void GLGizmoFlatten::on_render()
                     if (m_last_hit_facet != m_hit_facet) {
                         m_last_hit_facet = m_hit_facet;
                         m_one_tri_model.reset();
-                        const auto&  mv         = mo->volumes[m_rr.mesh_id];
-                        const auto  world_tran = (mo->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix()).cast<float>();
-                        const auto& vertices   = mv->mesh().its.vertices;
-                        const auto& cur_faces   = mv->mesh().its.indices;
-                        if (m_hit_facet < cur_faces.size()) {
+                        const ModelVolume *mv = get_model_part(mo, m_rr.mesh_id);
+                        if (mv && m_hit_facet < mv->mesh().its.indices.size()) {
+                            const auto  world_tran = (mo->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix()).cast<float>();
+                            const auto& vertices   = mv->mesh().its.vertices;
+                            const auto& cur_faces  = mv->mesh().its.indices;
                             indexed_triangle_set temp_its;
-                            const auto normal_bias = m_rr.normal * 0.05f;
+                            const Vec3f world_normal = (world_tran.linear().inverse().transpose() * m_rr.normal).normalized();
+                            const auto normal_bias = world_normal * 0.05f;
                             for (int i = 0; i < 3; ++i) {
                                 const auto& mesh_v = vertices[cur_faces[m_hit_facet][i]];
                                 auto v = world_tran * Vec4f(mesh_v[0], mesh_v[1], mesh_v[2], 1.0f);
